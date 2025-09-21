@@ -1,1 +1,291 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
+import os
 
+# Check if GPU is available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+class DigitClassifier(nn.Module):
+    """
+    Improved fully connected neural network for MNIST digit recognition.
+    Now includes dropout for better generalization.
+    """
+    def __init__(self, dropout_rate=0.2):
+        super().__init__()
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(28*28, 256)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout_rate)  # Prevent overfitting
+        self.fc2 = nn.Linear(256, 128)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout_rate)  # Prevent overfitting
+        self.fc3 = nn.Linear(128, 10)  # No dropout on output layer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.flatten(x)
+        x = self.relu1(self.fc1(x))
+        x = self.dropout1(x)  # Applied during training only
+        x = self.relu2(self.fc2(x))
+        x = self.dropout2(x)  # Applied during training only
+        x = self.fc3(x)
+        return x  # logits (not probabilities)
+
+class CNNDigitClassifier(nn.Module):
+    """
+    Alternative CNN architecture that typically performs better on images.
+    """
+    def __init__(self, dropout_rate=0.25):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+        self.pool = nn.MaxPool2d(2)
+        self.dropout1 = nn.Dropout2d(0.25)  # 2D dropout for conv layers
+        self.fc1 = nn.Linear(64 * 7 * 7, 128)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.fc2 = nn.Linear(128, 10)
+        
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = self.dropout1(x)
+        x = x.view(-1, 64 * 7 * 7)
+        x = torch.relu(self.fc1(x))
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return x
+
+def load_data_with_validation(batch_size: int, validation_split=0.1):
+    """
+    Load MNIST dataset with consistent preprocessing and validation split.
+    """
+    # Consistent base transform for test data
+    base_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))  # MNIST standard values
+    ])
+    
+    # Enhanced augmentation for training data
+    train_transform = transforms.Compose([
+        transforms.RandomRotation(10),
+        transforms.RandomAffine(0, shear=10, scale=(0.8, 1.2)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))  # Same normalization as test
+    ])
+    
+    # Load datasets
+    full_train_dataset = datasets.MNIST(root="./data", train=True, download=True, transform=train_transform)
+    test_dataset = datasets.MNIST(root="./data", train=False, download=True, transform=base_transform)
+    
+    # Split training data into train and validation
+    train_size = int((1 - validation_split) * len(full_train_dataset))
+    val_size = len(full_train_dataset) - train_size
+    train_dataset, val_dataset = random_split(full_train_dataset, [train_size, val_size])
+    
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
+    
+    print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    return train_loader, val_loader, test_loader
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler=None, max_epochs=50):
+    """
+    Enhanced training function with validation tracking and early stopping.
+    """
+    model.to(device)
+    
+    best_val_acc = 0
+    patience_counter = 0
+    patience = 5  # Stop if no improvement for 5 epochs
+    
+    print(f"Starting training for up to {max_epochs} epochs...")
+    print("-" * 60)
+    
+    for epoch in range(max_epochs):
+        # Training phase
+        model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
+
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1:2d}/{max_epochs}", ncols=100)
+        for imgs, labels in train_pbar:
+            imgs, labels = imgs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            logits = model(imgs)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            _, preds = torch.max(logits, dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+            
+            # Update progress bar
+            train_pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+        # Calculate training metrics
+        avg_loss = total_loss / len(train_loader)
+        train_accuracy = 100. * correct / total
+        
+        # Validation phase
+        val_accuracy = evaluate_model(model, val_loader, return_accuracy=True, verbose=False)
+        
+        print(f"Epoch {epoch+1:2d}: Train Loss: {avg_loss:.4f}, Train Acc: {train_accuracy:.2f}%, Val Acc: {val_accuracy:.2f}%")
+        
+        # Learning rate scheduling
+        if scheduler:
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            if epoch > 0:  # Don't print LR on first epoch
+                print(f"         Learning rate: {current_lr:.6f}")
+        
+        # Early stopping logic
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
+            patience_counter = 0
+            # Save best model
+            torch.save(model.state_dict(), 'best_mnist_model.pth')
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f"\nEarly stopping at epoch {epoch+1}!")
+            print(f"Best validation accuracy: {best_val_acc:.2f}%")
+            break
+    
+    # Load best model weights
+    model.load_state_dict(torch.load('best_mnist_model.pth'))
+    print(f"\nTraining completed. Best validation accuracy: {best_val_acc:.2f}%")
+    return best_val_acc
+
+def evaluate_model(model, test_loader, return_accuracy=False, verbose=True):
+    """
+    Evaluate the model on the test dataset.
+    """
+    model.eval()
+    model.to(device)
+    
+    correct, total = 0, 0
+    with torch.no_grad():
+        for imgs, labels in test_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            logits = model(imgs)
+            _, preds = torch.max(logits, dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    accuracy = 100. * correct / total
+    if verbose:
+        print(f"Test Accuracy: {accuracy:.2f}%")
+    
+    if return_accuracy:
+        return accuracy
+
+def save_model(model, filepath, metadata=None):
+    """
+    Save model with metadata.
+    """
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'model_class': model.__class__.__name__
+    }
+    if metadata:
+        save_dict.update(metadata)
+    
+    torch.save(save_dict, filepath)
+    print(f"Model saved to {filepath}")
+
+def load_model(filepath, model_class):
+    """
+    Load saved model.
+    """
+    checkpoint = torch.load(filepath)
+    model = model_class()
+    model.load_state_dict(checkpoint['model_state_dict'])
+    return model
+
+def count_parameters(model):
+    """
+    Count trainable parameters in the model.
+    """
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+if __name__ == "__main__":
+    # Hyperparameters
+    batch_size = 64
+    learning_rate = 0.001
+    max_epochs = 50
+    dropout_rate = 0.2
+    use_cnn = False  # Set to True to use CNN instead of fully connected
+    
+    print("=" * 60)
+    print("MNIST Digit Classification - Improved Version")
+    print("=" * 60)
+    
+    # Load data with validation split
+    train_loader, val_loader, test_loader = load_data_with_validation(batch_size)
+
+    # Initialize model
+    if use_cnn:
+        model = CNNDigitClassifier(dropout_rate=dropout_rate)
+        print("Using CNN architecture")
+    else:
+        model = DigitClassifier(dropout_rate=dropout_rate)
+        print("Using fully connected architecture")
+    
+    print(f"Model has {count_parameters(model):,} trainable parameters")
+    
+    # Loss function and optimizer with L2 regularization
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+    
+    print(f"Training configuration:")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Learning rate: {learning_rate}")
+    print(f"  Dropout rate: {dropout_rate}")
+    print(f"  Max epochs: {max_epochs}")
+    print(f"  Weight decay: 1e-4")
+    
+    # Train the model
+    best_val_acc = train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, max_epochs)
+
+    # Final evaluation on test set
+    print("\n" + "=" * 60)
+    print("FINAL RESULTS")
+    print("=" * 60)
+    test_acc = evaluate_model(model, test_loader)
+    
+    print(f"Best validation accuracy: {best_val_acc:.2f}%")
+    print(f"Final test accuracy: {test_acc:.2f}%")
+    
+    # Save the final model
+    metadata = {
+        'test_accuracy': test_acc,
+        'best_val_accuracy': best_val_acc,
+        'hyperparameters': {
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'dropout_rate': dropout_rate,
+            'architecture': 'CNN' if use_cnn else 'FC'
+        }
+    }
+    
+    save_model(model, 'final_mnist_model.pth', metadata)
+    
+    # Clean up temporary best model file
+    if os.path.exists('best_mnist_model.pth'):
+        os.remove('best_mnist_model.pth')
+    
+    print("\nTraining completed successfully!")
