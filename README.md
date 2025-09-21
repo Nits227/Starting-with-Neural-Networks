@@ -22,12 +22,6 @@ Built with stress and released under the [MIT License](LICENSE).
 - pip (or other package manager)  
 - (Optional) GPU with CUDA
 
-### Installation
-```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
-pip install -r requirements.txt
-
 
 ---------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------
