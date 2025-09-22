@@ -35,7 +35,7 @@ Built with stress and released under the [MIT License](LICENSE).
 
 
 
-##  🤓🤓The Handwritten Digits Recognition program or a neural network as nerd call it
+##  🤓🤓The Handwritten Digits Recognition program or a neural network as nerds prefer to call it that way
 
 
 
